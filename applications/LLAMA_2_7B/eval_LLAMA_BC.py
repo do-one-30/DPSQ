@@ -66,7 +66,6 @@ def main():
         device_map="auto"
     )
 
-
     if args.mode == "calib":
         calib_method = load_method_from_file(args.method_file, args.method_name)
         
