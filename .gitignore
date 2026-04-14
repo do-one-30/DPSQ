@@ -1,0 +1,28 @@
+# =========================
+
+# Python cache
+
+# =========================
+
+**pycache**/
+*.py[cod]
+*.pyo
+
+# =========================
+
+# Experiment outputs
+
+# =========================
+
+eval_output/
+methodA/
+tmp_calib/
+
+# =========================
+
+# Calibration files
+
+# =========================
+
+calib_scales.pt
+calib_scales.pth
