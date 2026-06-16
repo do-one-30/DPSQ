@@ -42,7 +42,7 @@ def replace_efficientvit_1x1_conv(model: nn.Module, method_func, tile_m, tile_n,
     return model, custom_modules
 
 
-def replace_efficientvit_1x1_conv_for_calib(model: nn.Module, calib_method, tile_size, gs, eps):
+def replace_efficientvit_1x1_conv_for_calib(model: nn.Module, calib_method, tile_size, gs, eps, bits=8):
     replaced_count = 0
     for name, module in model.named_modules():
         if "local_module.main.point_conv.conv" in name:
@@ -55,7 +55,7 @@ def replace_efficientvit_1x1_conv_for_calib(model: nn.Module, calib_method, tile
                 new_layer = CustomPointConvCalib(
                     in_channels=old_layer.in_channels, out_channels=old_layer.out_channels,
                     calib_method=calib_method, bias=(old_layer.bias is not None),
-                    tile_m=tile_size, tile_n=tile_size, tile_k=tile_size, gs=gs, eps=eps
+                    tile_m=tile_size, tile_n=tile_size, tile_k=tile_size, gs=gs, eps=eps, bits=bits
                 ).to(old_layer.weight.device, dtype=old_layer.weight.dtype)
 
                 with torch.no_grad():
@@ -67,7 +67,7 @@ def replace_efficientvit_1x1_conv_for_calib(model: nn.Module, calib_method, tile
     return model
 
 
-def replace_efficientvit_1x1_conv_for_eval(model: nn.Module, apply_method, layer_scales, tile_size, gs, eps):
+def replace_efficientvit_1x1_conv_for_eval(model: nn.Module, apply_method, layer_scales, tile_size, gs, eps, bits=8):
     replaced_count = 0
     for name, module in model.named_modules():
         if "local_module.main.point_conv.conv" in name:
@@ -81,7 +81,7 @@ def replace_efficientvit_1x1_conv_for_eval(model: nn.Module, apply_method, layer
                 new_layer = CustomPointConvEval(
                     in_channels=old_layer.in_channels, out_channels=old_layer.out_channels,
                     apply_method=apply_method, step_scales=layer_scales[name], bias=(old_layer.bias is not None),
-                    tile_m=tile_size, tile_n=tile_size, tile_k=tile_size, gs=gs, eps=eps
+                    tile_m=tile_size, tile_n=tile_size, tile_k=tile_size, gs=gs, eps=eps, bits=bits
                 ).to(old_layer.weight.device, dtype=old_layer.weight.dtype)
 
                 with torch.no_grad():

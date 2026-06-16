@@ -1,4 +1,5 @@
 
+import csv
 import torch
 import torch.nn as nn
 from typing import Optional, Dict
@@ -24,6 +25,121 @@ def load_method_from_file(file_path: str, func_name: str):
         raise AttributeError(f"'Function '{func_name}' does not exist in '{file_path}'.")
 
     return getattr(module, func_name)
+
+
+def parse_alpha_candidates(candidate_spec: str):
+    if not candidate_spec:
+        raise ValueError("alpha candidate specification must not be empty")
+
+    candidate_spec = candidate_spec.strip()
+    if ":" in candidate_spec:
+        parts = [float(part) for part in candidate_spec.split(":")]
+        if len(parts) != 3:
+            raise ValueError("range alpha candidates must use 'start:end:step'")
+        start, end, step = parts
+        if step <= 0:
+            raise ValueError(f"alpha candidate step must be > 0, but got {step}")
+        values = []
+        current = start
+        while current <= end + step * 1e-6:
+            values.append(round(current, 10))
+            current += step
+    else:
+        values = [float(part.strip()) for part in candidate_spec.split(",") if part.strip()]
+
+    if not values:
+        raise ValueError("no alpha candidates were parsed")
+    return sorted(dict.fromkeys(values))
+
+
+class DPSQAlphaStats:
+    def __init__(self):
+        self.total_outliers = 0.0
+        self.total_tiles = 0.0
+
+    def update(self, outlier_count, tile_count, alpha_scale=None, bits=None, n_idx=None):
+        if torch.is_tensor(outlier_count):
+            outlier_count = outlier_count.detach().cpu().item()
+        if torch.is_tensor(tile_count):
+            tile_count = tile_count.detach().cpu().item()
+
+        self.total_outliers += float(outlier_count)
+        self.total_tiles += float(tile_count)
+
+    def summary(self):
+        if self.total_tiles == 0:
+            outlier_per_tile = 0.0
+        else:
+            outlier_per_tile = self.total_outliers / self.total_tiles
+        return {
+            "outliers": self.total_outliers,
+            "tiles": self.total_tiles,
+            "outlier_per_tile": outlier_per_tile,
+        }
+
+
+def update_custom_method_kwargs(model: nn.Module, custom_layer_class, **kwargs):
+    if not isinstance(custom_layer_class, tuple):
+        custom_layer_class = (custom_layer_class,)
+
+    for module in model.modules():
+        if isinstance(module, custom_layer_class):
+            if hasattr(module, "method_kwargs"):
+                module.method_kwargs.update(kwargs)
+            if hasattr(module, "kwargs"):
+                module.kwargs.update(kwargs)
+            if hasattr(module, "linear_layer") and hasattr(module.linear_layer, "method_kwargs"):
+                module.linear_layer.method_kwargs.update(kwargs)
+
+
+def select_alpha_row(rows, target_outlier_per_tile: float):
+    if not rows:
+        raise ValueError("alpha calibration rows are empty")
+
+    valid_rows = [
+        row for row in rows
+        if row["outlier_per_tile"] < target_outlier_per_tile
+    ]
+
+    if valid_rows:
+        return valid_rows[0]
+
+    return rows[-1]
+
+
+def write_alpha_calibration_csv(csv_path: str, rows):
+    if not csv_path:
+        return
+
+    os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
+    fieldnames = [
+        "alpha_scale",
+        "bits",
+        "outliers",
+        "tiles",
+        "outlier_per_tile",
+        "target_outlier_per_tile",
+        "selected",
+    ]
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in fieldnames})
+
+
+def save_alpha_calibration(save_path: str, result: dict):
+    os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+    torch.save(result, save_path)
+
+
+def load_alpha_calibration(alpha_path: str, bits: Optional[int] = None):
+    alpha_obj = torch.load(alpha_path, map_location="cpu")
+    if bits is not None and alpha_obj.get("bits") is not None and int(alpha_obj["bits"]) != int(bits):
+        raise ValueError(
+            f"Alpha file was calibrated with bits={alpha_obj['bits']}, but current bits={bits}"
+        )
+    return float(alpha_obj["alpha_scale"]), alpha_obj
 
 
 class CustomLinear(nn.Module):
@@ -94,6 +210,7 @@ class CustomLinearCalib(nn.Module):
         tile_k: int = 16,
         gs: int = 1,
         eps: float = 1e-8,
+        bits: int = 8,
     ):
         super().__init__()
         self.in_features = in_features
@@ -104,6 +221,7 @@ class CustomLinearCalib(nn.Module):
         self.tile_k = tile_k
         self.gs = gs
         self.eps = eps
+        self.bits = bits
 
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         if bias:
@@ -129,6 +247,7 @@ class CustomLinearCalib(nn.Module):
             tile_k=self.tile_k,
             gs=self.gs,
             eps=self.eps,
+            bits=self.bits,
         )
 
         if not torch.is_tensor(step_scales):
@@ -168,6 +287,7 @@ class CustomLinearEval(nn.Module):
         tile_k: int = 16,
         gs: int = 1,
         eps: float = 1e-8,
+        bits: int = 8,
     ):
         super().__init__()
         self.in_features = in_features
@@ -178,6 +298,7 @@ class CustomLinearEval(nn.Module):
         self.tile_k = tile_k
         self.gs = gs
         self.eps = eps
+        self.bits = bits
 
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         if bias:
@@ -205,6 +326,7 @@ class CustomLinearEval(nn.Module):
             tile_k=self.tile_k,
             gs=self.gs,
             eps=self.eps,
+            bits=self.bits,
         )
         return out
     
@@ -234,13 +356,13 @@ class CustomPointConv(nn.Module):
     
 
 class CustomPointConvCalib(nn.Module):
-    def __init__(self, in_channels, out_channels, calib_method, bias, tile_m, tile_n, tile_k, gs, eps):
+    def __init__(self, in_channels, out_channels, calib_method, bias, tile_m, tile_n, tile_k, gs, eps, bits=8):
         super().__init__()
         self.out_channels = out_channels
         self.linear_layer = CustomLinearCalib(
             in_features=in_channels, out_features=out_channels,
             calib_method=calib_method, bias=bias,
-            tile_m=tile_m, tile_n=tile_n, tile_k=tile_k, gs=gs, eps=eps
+            tile_m=tile_m, tile_n=tile_n, tile_k=tile_k, gs=gs, eps=eps, bits=bits
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -255,13 +377,13 @@ class CustomPointConvCalib(nn.Module):
 
 
 class CustomPointConvEval(nn.Module):
-    def __init__(self, in_channels, out_channels, apply_method, step_scales, bias, tile_m, tile_n, tile_k, gs, eps):
+    def __init__(self, in_channels, out_channels, apply_method, step_scales, bias, tile_m, tile_n, tile_k, gs, eps, bits=8):
         super().__init__()
         self.out_channels = out_channels
         self.linear_layer = CustomLinearEval(
             in_features=in_channels, out_features=out_channels,
             apply_method=apply_method, step_scales=step_scales, bias=bias,
-            tile_m=tile_m, tile_n=tile_n, tile_k=tile_k, gs=gs, eps=eps
+            tile_m=tile_m, tile_n=tile_n, tile_k=tile_k, gs=gs, eps=eps, bits=bits
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

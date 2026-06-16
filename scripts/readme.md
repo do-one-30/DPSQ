@@ -1,3 +1,23 @@
+## Common options
+
+All methods now accept `--bits {8,6,4}`. The default is `--bits 8`, which preserves the previous INT8 setting. For method B/C, use the same `--bits` value for both calibration and evaluation because calibrated step scales are bitwidth-dependent.
+
+DPSQ alpha can be calibrated on a calibration subset by adding `--calibrate_alpha` to the ADEF/DPSQ evaluation script. The calibration run writes a `.pt` alpha file and a CSV with one row per candidate alpha. The selected alpha is the first candidate whose `outlier/tile` is lower than `--target_outlier_per_tile` (default: 1.0).
+
+For the Method G experiment script, calibration is run once per dataset with `CALIB_RATIO=0.1` by default, then one global alpha is selected per model group and bitwidth. Each dataset first selects the minimum alpha where `outlier/tile < TARGET_OUTLIER_PER_TILE`; the global alpha is the maximum of those per-dataset minimum alphas. BERT evaluation reuses `alpha_calib/methodG/bert/global/bits*/global_alpha.pt`, and LLaMA evaluation reuses `alpha_calib/methodG/llama/global/bits*/global_alpha.pt`.
+
+Example for BERT DPSQ INT4 alpha calibration:
+```bash
+python -m applications.BERT_Base.eval_BERT_ADEF_DPSQ --method_file ./methods/methods.py --method_name DPSQ --model_name_or_path textattack/bert-base-uncased-MRPC --dataset_name mrpc --tile_size 128 --bits 4 --calibrate_alpha --calib_ratio 0.1 --alpha_candidates 0.5:12.0:0.5 --alpha_save_path ./eval_output/dpsq_alpha_mrpc_bits4.pt --alpha_csv_path ./eval_output/dpsq_alpha_mrpc_bits4.csv
+```
+
+Then evaluate with the calibrated alpha:
+```bash
+python -m applications.BERT_Base.eval_BERT_ADEF_DPSQ --method_file ./methods/methods.py --method_name DPSQ --model_name_or_path textattack/bert-base-uncased-MRPC --dataset_name mrpc --tile_size 128 --bits 4 --alpha_path ./eval_output/dpsq_alpha_mrpc_bits4.pt
+```
+
+The same alpha calibration options are available for LLaMA, SegFormer, and EfficientViT ADEF/DPSQ scripts. For EfficientViT alpha calibration, pass the calibration image path through `--path`; for evaluation, pass the validation image path and reuse `--alpha_path`.
+
 ## BERT_Base
 
 ### method A

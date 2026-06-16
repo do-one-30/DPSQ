@@ -2,15 +2,29 @@ import torch
 import torch.nn.functional as F
 from typing import Tuple, Optional
 
+
+def get_symmetric_quant_bounds(bits: int) -> Tuple[int, int]:
+    if bits < 2:
+        raise ValueError(f"bits must be >= 2, but got {bits}")
+
+    qmax = (1 << (bits - 1)) - 1
+    qmin = -qmax
+    return qmin, qmax
+
+
 def prepare_quantized_blocks(
     x: torch.Tensor,
     weight: torch.Tensor,
     attention_mask: Optional[torch.Tensor],
     tile_m: int, tile_n: int, tile_k: int,
     eps: float = 1e-8,
-    qmin: int = -127,
-    qmax: int = 127
+    bits: int = 8,
+    qmin: Optional[int] = None,
+    qmax: Optional[int] = None
 ) -> Tuple:
+    if qmin is None or qmax is None:
+        qmin, qmax = get_symmetric_quant_bounds(bits)
+
     B, M, N = x.shape
     K = weight.shape[1]
 
@@ -36,11 +50,11 @@ def prepare_quantized_blocks(
 
     # 3. Block Reshape & Init Quantization
     x_blocks = x_pad.view(B, num_m, tile_m, num_n, tile_n).transpose(2, 3)
-    sx = torch.clamp(x_blocks.abs().amax(dim=-1, keepdim=True) / 127.0, min=eps)
+    sx = torch.clamp(x_blocks.abs().amax(dim=-1, keepdim=True) / float(qmax), min=eps)
     qx = torch.round(x_blocks / sx).clamp(qmin, qmax)
 
     w_blocks = w_pad.view(num_n, tile_n, num_k, tile_k).transpose(1, 2)
-    sw = torch.clamp(w_blocks.abs().amax(dim=-2, keepdim=True) / 127.0, min=eps)
+    sw = torch.clamp(w_blocks.abs().amax(dim=-2, keepdim=True) / float(qmax), min=eps)
     qw = torch.round(w_blocks / sw).clamp(qmin, qmax)
 
     sx_aligned = sx.unsqueeze(3)

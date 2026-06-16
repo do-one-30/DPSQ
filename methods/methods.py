@@ -9,7 +9,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.append(current_dir)
 
-from methods_utils import prepare_quantized_blocks, finalize_output
+from methods_utils import prepare_quantized_blocks, finalize_output, get_symmetric_quant_bounds
 
 
 
@@ -23,14 +23,16 @@ def methodA(
     tile_n: int = 16,
     tile_k: int = 16,
     eps: float = 1e-8,
+    bits: int = 8,
     **kwargs
 ):
     dtype = x.dtype
     x = x.to(torch.float32)
     weight = weight.to(torch.float32)
+    qmin, qmax = get_symmetric_quant_bounds(bits)
 
     qx, qw, sx_aligned, sw_aligned, meta = prepare_quantized_blocks(
-        x, weight, attention_mask, tile_m, tile_n, tile_k, eps
+        x, weight, attention_mask, tile_m, tile_n, tile_k, eps, bits=bits
     )
 
     B = x.shape[0]
@@ -74,6 +76,7 @@ def methodB_C_calib(
     tile_k: int = 16,
     gs: int = 1,
     eps: float = 1e-8,
+    bits: int = 8,
     **kwargs
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     
@@ -83,9 +86,10 @@ def methodB_C_calib(
     dtype = x.dtype
     x = x.to(torch.float32)
     weight = weight.to(torch.float32)
+    qmin, qmax = get_symmetric_quant_bounds(bits)
 
     qx, qw, sx_aligned, sw_aligned, meta = prepare_quantized_blocks(
-        x, weight, attention_mask, tile_m, tile_n, tile_k, eps
+        x, weight, attention_mask, tile_m, tile_n, tile_k, eps, bits=bits
     )
 
     num_n = meta['num_n']
@@ -111,7 +115,7 @@ def methodB_C_calib(
             target_tensor = dequant_n
             
         step_max = target_tensor.abs().amax(dim=(1, 2, 3, 4))
-        step_scale = torch.clamp(step_max / 127.0, min=eps)
+        step_scale = torch.clamp(step_max / float(qmax), min=eps)
         step_scales_list.append(step_scale)
 
         if n == num_n - 1:
@@ -138,14 +142,16 @@ def methodB_C(
     tile_k: int = 16,
     gs: int = 1,
     eps: float = 1e-8,
+    bits: int = 8,
     **kwargs
 ):
     dtype = x.dtype
     x = x.to(torch.float32)
     weight = weight.to(torch.float32)
+    qmin, qmax = get_symmetric_quant_bounds(bits)
 
     qx, qw, sx_aligned, sw_aligned, meta = prepare_quantized_blocks(
-        x, weight, attention_mask, tile_m, tile_n, tile_k, eps,
+        x, weight, attention_mask, tile_m, tile_n, tile_k, eps, bits=bits
     )
 
     num_n = meta['num_n']
@@ -171,7 +177,7 @@ def methodB_C(
             target_fp = dequant_n
 
         raw_q_n = torch.round(target_fp / alpha_n)
-        q_n = raw_q_n.clamp(-127, 127)
+        q_n = raw_q_n.clamp(qmin, qmax)
         
         if is_apsq_step:
             group_accum_fp32 = q_n.to(torch.float32) * alpha_n
@@ -197,14 +203,16 @@ def methodD(
     tile_n: int = 16,
     tile_k: int = 16,
     eps: float = 1e-8,
+    bits: int = 8,
     **kwargs
 ):
     dtype = x.dtype
     x = x.to(torch.float32)
     weight = weight.to(torch.float32)
+    qmin, qmax = get_symmetric_quant_bounds(bits)
 
     qx, qw, sx_aligned, sw_aligned, meta = prepare_quantized_blocks(
-        x, weight, attention_mask, tile_m, tile_n, tile_k, eps
+        x, weight, attention_mask, tile_m, tile_n, tile_k, eps, bits=bits
     )
 
     num_n = meta['num_n']
@@ -228,9 +236,9 @@ def methodD(
 
         # [DYNAMIC SCALE CALCULATION: Tile-wise]
         tile_max = fp32_psum.abs().amax(dim=(-2, -1), keepdim=True) 
-        current_scale = torch.clamp(tile_max / 127.0, min=eps)
+        current_scale = torch.clamp(tile_max / float(qmax), min=eps)
 
-        accum_psum_int8 = torch.round(fp32_psum / current_scale).clamp(-127, 127)
+        accum_psum_int8 = torch.round(fp32_psum / current_scale).clamp(qmin, qmax)
         prev_scale = current_scale
 
     return finalize_output(fp32_psum, meta, dtype, bias)
@@ -246,14 +254,16 @@ def methodE(
     tile_n: int = 16,
     tile_k: int = 16,
     eps: float = 1e-8,
+    bits: int = 8,
     **kwargs
 ):
     dtype = x.dtype
     x = x.to(torch.float32)
     weight = weight.to(torch.float32)
+    qmin, qmax = get_symmetric_quant_bounds(bits)
 
     qx, qw, sx_aligned, sw_aligned, meta = prepare_quantized_blocks(
-        x, weight, attention_mask, tile_m, tile_n, tile_k, eps
+        x, weight, attention_mask, tile_m, tile_n, tile_k, eps, bits=bits
     )
 
     num_n = meta['num_n']
@@ -278,10 +288,10 @@ def methodE(
 
         # [DYNAMIC SCALE CALCULATION: Row-wise]
         row_max = fp32_psum.abs().amax(dim=-1, keepdim=True) 
-        current_scale = torch.clamp(row_max / 127.0, min=eps)
+        current_scale = torch.clamp(row_max / float(qmax), min=eps)
 
         # [QUANTIZE & STORE]
-        accum_psum_int8 = torch.round(fp32_psum / current_scale).clamp(-127, 127)
+        accum_psum_int8 = torch.round(fp32_psum / current_scale).clamp(qmin, qmax)
         prev_scale = current_scale
 
     return finalize_output(fp32_psum, meta, dtype, bias)
@@ -297,14 +307,16 @@ def methodF(
     tile_n: int = 16,
     tile_k: int = 16,
     eps: float = 1e-8,
+    bits: int = 8,
     **kwargs
 ):
     dtype = x.dtype
     x = x.to(torch.float32)
     weight = weight.to(torch.float32)
+    qmin, qmax = get_symmetric_quant_bounds(bits)
 
     qx, qw, sx_aligned, sw_aligned, meta = prepare_quantized_blocks(
-        x, weight, attention_mask, tile_m, tile_n, tile_k, eps
+        x, weight, attention_mask, tile_m, tile_n, tile_k, eps, bits=bits
     )
 
     num_n = meta['num_n']
@@ -328,9 +340,9 @@ def methodF(
 
         # [DYNAMIC SCALE CALCULATION: Col-wise]
         col_max = fp32_psum.abs().amax(dim=-2, keepdim=True) 
-        current_scale = torch.clamp(col_max / 127.0, min=eps)
+        current_scale = torch.clamp(col_max / float(qmax), min=eps)
 
-        accum_psum_int8 = torch.round(fp32_psum / current_scale).clamp(-127, 127)
+        accum_psum_int8 = torch.round(fp32_psum / current_scale).clamp(qmin, qmax)
         prev_scale = current_scale
 
     return finalize_output(fp32_psum, meta, dtype, bias)
@@ -348,19 +360,22 @@ def DPSQ(
     tile_k: int = 16,
     eps: float = 1e-8,
     alpha_scale: float = 2.5,
+    bits: int = 8,
+    alpha_stats: Optional[object] = None,
 ):
     
     dtype = x.dtype
     device = x.device
     x = x.to(torch.float32)
     weight = weight.to(torch.float32)
+    qmin, qmax = get_symmetric_quant_bounds(bits)
 
     #print(attention_mask)
 
     #print(alpha_scale)
 
     qx, qw, sx_aligned, sw_aligned, meta = prepare_quantized_blocks(
-        x, weight, attention_mask, tile_m, tile_n, tile_k, eps
+        x, weight, attention_mask, tile_m, tile_n, tile_k, eps, bits=bits
     )
 
     B = x.shape[0]
@@ -407,14 +422,25 @@ def DPSQ(
         threshold = tile_mean * alpha_scale
         outlier_mask = (row_max > threshold) & valid_row_mask.bool()
 
-        individual_scale = row_max / 127.0
+        if alpha_stats is not None:
+            valid_tile_mask = valid_row_mask.sum(dim=-2, keepdim=True) > 0
+            tile_count = valid_tile_mask.expand(-1, -1, row_max.shape[2], -1, -1).sum()
+            alpha_stats.update(
+                outlier_count=outlier_mask.sum(),
+                tile_count=tile_count,
+                alpha_scale=alpha_scale,
+                bits=bits,
+                n_idx=n_idx,
+            )
+
+        individual_scale = row_max / float(qmax)
         non_outlier_vals = torch.where(~outlier_mask, row_max, torch.zeros_like(row_max))
-        group_scale = non_outlier_vals.amax(dim=-2, keepdim=True) / 127.0
+        group_scale = non_outlier_vals.amax(dim=-2, keepdim=True) / float(qmax)
         
         current_scale = torch.where(outlier_mask, individual_scale, group_scale)
         current_scale = torch.clamp(current_scale, min=eps)
 
-        accum_psum_int8 = torch.round(fp32_psum / current_scale).clamp(-127, 127)
+        accum_psum_int8 = torch.round(fp32_psum / current_scale).clamp(qmin, qmax)
         prev_scale = current_scale
 
     final_fp32_out = accum_psum_int8.to(torch.float32) * prev_scale

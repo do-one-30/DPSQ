@@ -34,7 +34,7 @@ def replace_vision_mlp2_layer(model: nn.Module, method_func, tile_m: int, tile_n
                 
     return model
 
-def replace_vision_mlp2_layer_for_calib(model: nn.Module, calib_method, tile_m: int, tile_n: int, tile_k: int, gs: int, eps: float):
+def replace_vision_mlp2_layer_for_calib(model: nn.Module, calib_method, tile_m: int, tile_n: int, tile_k: int, gs: int, eps: float, bits: int = 8):
     replaced_count = 0
     for name, module in model.named_modules():
         if name.endswith("mlp.dense2") or name.endswith("mlp.fc2") or name.endswith("ffn.fc2"):
@@ -47,7 +47,7 @@ def replace_vision_mlp2_layer_for_calib(model: nn.Module, calib_method, tile_m: 
                 new_fc2 = CustomLinearCalib(
                     in_features=old_fc2.in_features, out_features=old_fc2.out_features,
                     calib_method=calib_method, bias=(old_fc2.bias is not None),
-                    tile_m=tile_m, tile_n=tile_n, tile_k=tile_k, gs=gs, eps=eps,
+                    tile_m=tile_m, tile_n=tile_n, tile_k=tile_k, gs=gs, eps=eps, bits=bits,
                 ).to(old_fc2.weight.device, dtype=old_fc2.weight.dtype)
 
                 with torch.no_grad():
@@ -60,7 +60,7 @@ def replace_vision_mlp2_layer_for_calib(model: nn.Module, calib_method, tile_m: 
                 
     return model
 
-def replace_vision_mlp2_layer_for_eval(model: nn.Module, apply_method, layer_scales: dict, tile_m: int, tile_n: int, tile_k: int, gs: int, eps: float):
+def replace_vision_mlp2_layer_for_eval(model: nn.Module, apply_method, layer_scales: dict, tile_m: int, tile_n: int, tile_k: int, gs: int, eps: float, bits: int = 8):
     replaced_count = 0
     for name, module in model.named_modules():
         if name.endswith("mlp.dense2") or name.endswith("mlp.fc2") or name.endswith("ffn.fc2"):
@@ -77,7 +77,7 @@ def replace_vision_mlp2_layer_for_eval(model: nn.Module, apply_method, layer_sca
                 new_fc2 = CustomLinearEval(
                     in_features=old_fc2.in_features, out_features=old_fc2.out_features,
                     apply_method=apply_method, step_scales=step_scales, bias=(old_fc2.bias is not None),
-                    tile_m=tile_m, tile_n=tile_n, tile_k=tile_k, gs=gs, eps=eps,
+                    tile_m=tile_m, tile_n=tile_n, tile_k=tile_k, gs=gs, eps=eps, bits=bits,
                 ).to(old_fc2.weight.device, dtype=old_fc2.weight.dtype)
 
                 with torch.no_grad():

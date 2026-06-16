@@ -70,7 +70,7 @@ def replace_llama_mlp_layer(model: nn.Module, method_func, tile_m: int, tile_n: 
         layer.mlp.down_proj = new_down_proj
     return model
 
-def replace_llama_mlp_layer_for_calib(model: nn.Module, calib_method, tile_size: int, gs: int, eps: float):
+def replace_llama_mlp_layer_for_calib(model: nn.Module, calib_method, tile_size: int, gs: int, eps: float, bits: int = 8):
     for i, layer in enumerate(model.model.layers):
         old_down_proj = layer.mlp.down_proj
         new_down_proj = CustomLinearCalib(
@@ -79,7 +79,7 @@ def replace_llama_mlp_layer_for_calib(model: nn.Module, calib_method, tile_size:
             calib_method=calib_method,
             bias=False, 
             tile_m=tile_size, tile_n=tile_size, tile_k=tile_size,
-            gs=gs, eps=eps
+            gs=gs, eps=eps, bits=bits
         ).to(old_down_proj.weight.device, dtype=old_down_proj.weight.dtype)
         
         with torch.no_grad():
@@ -88,7 +88,7 @@ def replace_llama_mlp_layer_for_calib(model: nn.Module, calib_method, tile_size:
         layer.mlp.down_proj = new_down_proj
     return model
 
-def replace_llama_mlp_layer_for_eval(model: nn.Module, apply_method, layer_scales, tile_size: int, gs: int, eps: float):
+def replace_llama_mlp_layer_for_eval(model: nn.Module, apply_method, layer_scales, tile_size: int, gs: int, eps: float, bits: int = 8):
     scale_list = list(layer_scales.values())
     for i, layer in enumerate(model.model.layers):
         old_down_proj = layer.mlp.down_proj
@@ -101,7 +101,7 @@ def replace_llama_mlp_layer_for_eval(model: nn.Module, apply_method, layer_scale
             step_scales=current_scale,
             bias=False, 
             tile_m=tile_size, tile_n=tile_size, tile_k=tile_size,
-            gs=gs, eps=eps
+            gs=gs, eps=eps, bits=bits
         ).to(old_down_proj.weight.device, dtype=old_down_proj.weight.dtype)
         
         with torch.no_grad():

@@ -32,6 +32,7 @@ def main():
     calib_parser.add_argument("--tile_size", type=int, default=16)
     calib_parser.add_argument("--gs", type=int, default=1)
     calib_parser.add_argument("--eps", type=float, default=1e-8)
+    calib_parser.add_argument("--bits", type=int, default=8, choices=[4, 6, 8])
     calib_parser.add_argument("--calib_ratio", type=float, default=0.1)
     calib_parser.add_argument("--batch_size", type=int, default=16)
     calib_parser.add_argument("--seed", type=int, default=42)
@@ -48,6 +49,7 @@ def main():
     eval_parser.add_argument("--tile_size", type=int, default=16)
     eval_parser.add_argument("--gs", type=int, default=1)
     eval_parser.add_argument("--eps", type=float, default=1e-8)
+    eval_parser.add_argument("--bits", type=int, default=8, choices=[4, 6, 8])
     eval_parser.add_argument("--output_dir", type=str, default="./eval_output")
     eval_parser.add_argument("--batch_size", type=int, default=16)
     eval_parser.add_argument("--seed", type=int, default=42)
@@ -69,7 +71,7 @@ def main():
     if args.mode == "calib":
         calib_method = load_method_from_file(args.method_file, args.method_name)
         
-        model = replace_llama_mlp_layer_for_calib(model, calib_method, args.tile_size, args.gs, args.eps)
+        model = replace_llama_mlp_layer_for_calib(model, calib_method, args.tile_size, args.gs, args.eps, args.bits)
         model = inject_llama_mask_wrapper(model, CustomLinearCalib)
         model.eval()
 
@@ -96,7 +98,7 @@ def main():
             "model_name_or_path": args.model_name_or_path,
             "dataset_name": args.dataset_name,
             "tile_size": args.tile_size,
-            "gs": args.gs, "eps": args.eps,
+            "gs": args.gs, "eps": args.eps, "bits": args.bits,
             "layer_scales": {k: v.cpu() for k, v in layer_scales.items()},
         }
 
@@ -109,9 +111,11 @@ def main():
         eval_method = load_method_from_file(args.method_file, args.method_name)
         
         scale_obj = torch.load(args.scale_path, map_location="cpu")
+        if scale_obj.get("bits") is not None and int(scale_obj["bits"]) != int(args.bits):
+            raise ValueError(f"Scale file was calibrated with bits={scale_obj['bits']}, but current bits={args.bits}")
         layer_scales = scale_obj["layer_scales"]
 
-        model = replace_llama_mlp_layer_for_eval(model, eval_method, layer_scales, args.tile_size, args.gs, args.eps)
+        model = replace_llama_mlp_layer_for_eval(model, eval_method, layer_scales, args.tile_size, args.gs, args.eps, args.bits)
         model = inject_llama_mask_wrapper(model, CustomLinearEval)
         model.eval()
 

@@ -1,6 +1,7 @@
 # modules/data_utils.py
 
 import functools
+from typing import Dict
 import numpy as np
 from datasets import load_dataset
 import evaluate
@@ -68,13 +69,13 @@ def replace_bert_mlp_layer(model: nn.Module, method_func, tile_m: int, tile_n: i
 
 
 
-def replace_bert_output_dense_for_calib(model: nn.Module, calib_method, tile_m: int, tile_n: int, tile_k: int, gs: int, eps: float):
+def replace_bert_output_dense_for_calib(model: nn.Module, calib_method, tile_m: int, tile_n: int, tile_k: int, gs: int, eps: float, bits: int = 8):
     for i, layer in enumerate(model.bert.encoder.layer):
         old_linear = layer.output.dense
         new_linear = CustomLinearCalib(
             in_features=old_linear.in_features, out_features=old_linear.out_features,
             calib_method=calib_method, bias=(old_linear.bias is not None),
-            tile_m=tile_m, tile_n=tile_n, tile_k=tile_k, gs=gs, eps=eps,
+            tile_m=tile_m, tile_n=tile_n, tile_k=tile_k, gs=gs, eps=eps, bits=bits,
         ).to(old_linear.weight.device, dtype=old_linear.weight.dtype)
 
         with torch.no_grad():
@@ -86,7 +87,7 @@ def replace_bert_output_dense_for_calib(model: nn.Module, calib_method, tile_m: 
     return model
 
 
-def replace_bert_output_dense_for_eval(model: nn.Module, apply_method, layer_scales: Dict[str, torch.Tensor], tile_m: int, tile_n: int, tile_k: int, gs: int, eps: float):
+def replace_bert_output_dense_for_eval(model: nn.Module, apply_method, layer_scales: Dict[str, torch.Tensor], tile_m: int, tile_n: int, tile_k: int, gs: int, eps: float, bits: int = 8):
     for i, layer in enumerate(model.bert.encoder.layer):
         old_linear = layer.output.dense
         key = f"layer_{i}"
@@ -94,7 +95,7 @@ def replace_bert_output_dense_for_eval(model: nn.Module, apply_method, layer_sca
         new_linear = CustomLinearEval(
             in_features=old_linear.in_features, out_features=old_linear.out_features,
             apply_method=apply_method, step_scales=layer_scales[key], bias=(old_linear.bias is not None),
-            tile_m=tile_m, tile_n=tile_n, tile_k=tile_k, gs=gs, eps=eps,
+            tile_m=tile_m, tile_n=tile_n, tile_k=tile_k, gs=gs, eps=eps, bits=bits,
         ).to(old_linear.weight.device, dtype=old_linear.weight.dtype)
 
         with torch.no_grad():

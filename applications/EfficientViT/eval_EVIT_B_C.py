@@ -37,6 +37,7 @@ def main():
     common.add_argument("--batch_size", type=int, default=1)
     common.add_argument("--gpu", type=str, default="0")
     common.add_argument("--eps", type=float, default=1e-8)
+    common.add_argument("--bits", type=int, default=8, choices=[4, 6, 8])
 
     calib_p = subparsers.add_parser("calib", parents=[common])
     calib_p.add_argument("--save_path", type=str, default="./calib_scales.pth")
@@ -60,7 +61,7 @@ def main():
 
     if args.mode == "calib":
         torch.manual_seed(args.seed)
-        model = replace_efficientvit_1x1_conv_for_calib(model, selected_method, args.tile_size, args.gs, 1e-8)
+        model = replace_efficientvit_1x1_conv_for_calib(model, selected_method, args.tile_size, args.gs, args.eps, args.bits)
         model = torch.nn.DataParallel(model).cuda().eval()
 
         calib_size = max(1, int(len(dataset) * args.calib_ratio))
@@ -73,11 +74,14 @@ def main():
                 model(batch["data"].cuda())
 
         scales = collect_evit_layer_mean_scales(model.module)
-        torch.save({"layer_scales": {k: v.cpu() for k, v in scales.items()}}, args.save_path)
+        torch.save({"bits": args.bits, "tile_size": args.tile_size, "gs": args.gs, "eps": args.eps, "layer_scales": {k: v.cpu() for k, v in scales.items()}}, args.save_path)
 
     elif args.mode == "eval":
-        scales = torch.load(args.scale_path, map_location="cpu")["layer_scales"]
-        model = replace_efficientvit_1x1_conv_for_eval(model, selected_method, scales, args.tile_size, args.gs, 1e-8)
+        scale_obj = torch.load(args.scale_path, map_location="cpu")
+        if scale_obj.get("bits") is not None and int(scale_obj["bits"]) != int(args.bits):
+            raise ValueError(f"Scale file was calibrated with bits={scale_obj['bits']}, but current bits={args.bits}")
+        scales = scale_obj["layer_scales"]
+        model = replace_efficientvit_1x1_conv_for_eval(model, selected_method, scales, args.tile_size, args.gs, args.eps, args.bits)
         model = torch.nn.DataParallel(model).cuda().eval()
 
         loader = DataLoader(dataset, batch_size=args.batch_size, num_workers=4)

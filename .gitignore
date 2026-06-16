@@ -23,6 +23,31 @@ tmp_calib/
 # Calibration files
 
 # =========================
-
+calib_scales
 calib_scales.pt
 calib_scales.pth
+alpha_calib
+
+# =========================
+
+# logs
+
+# =========================
+logs
+
+
+# =========================
+
+# scripts
+
+# =========================
+scripts/run_methodB_experiments.sh
+scripts/run_methodG_experiments.sh
+scripts/select_global_alpha.py
+
+# =========================
+
+# temp
+
+# =========================
+create_csv_from_eval.py
