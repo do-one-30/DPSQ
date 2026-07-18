@@ -30,6 +30,10 @@ The following methods are implemented in `methods/methods.py`:
 - `methodE`: row-wise dynamic PSUM quantization
 - `methodF`: column-wise dynamic PSUM quantization
 - `DPSQ`: proposed mixed-granularity dynamic PSUM quantization
+- `LLM_int8`: PSUM-level LLM.int8() baseline — the top-r output-feature PSUM columns by magnitude are kept in FP32, the rest PSUM-quantized (dynamic; language models only)
+- `OWQ`: PSUM-level OWQ baseline — a fixed set of sensitive PSUM columns chosen on a calibration set is kept in FP32, the rest PSUM-quantized (calibration-based; language models only)
+
+> **Note on `LLM_int8` / `OWQ` (approach A, PSUM-level).** Both baselines operate directly on the partial sum: outliers are selected among the **output-feature columns** of the accumulated PSUM (the input-stable axis), and the selected columns bypass PSUM quantization (exact FP32) while every other column goes through the framework's tile-wise **absmax** INT PSUM (no GPTQ — weight/activation quantization is fixed across all methods so only PSUM handling differs). Both size their FP32 budget with the **same per-tile notion as DPSQ**: `outlier_per_tile` FP32 columns per PSUM tile on average, i.e. `r = round(outlier_per_tile · ⌈K/tile_k⌉)` columns kept in FP32. `LLM_int8` picks the top-r columns by magnitude **dynamically, with no calibration and no threshold**. `OWQ` is **calibration-based** — it first ranks columns by the PSUM-quantization error measured on a calibration subset (like method B/C, `calib_ratio=0.1` by default), keeps the top-r as weak columns, saves them, and reuses them at evaluation. Evaluation reports `hp_fraction` (average fraction of columns kept in FP32) as the high-precision overhead. Provided for BERT-Base and LLaMA-2-7B only (vision excluded). These port only the outlier-selection idea of LLM.int8()/OWQ into the PSUM domain, not their full pipelines.
 
 ---
 

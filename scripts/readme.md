@@ -1,3 +1,38 @@
+## Batch runners for the PSUM-level baselines (LLM_int8 / OWQ)
+
+Two convenience scripts sweep both baselines over all downstream tasks and
+bit-widths. Run them with `bash` (not tcsh). They `cd` to the repo root
+themselves and put results under `$OUTDIR/<method>/` (per-method dirs, since the
+BERT eval's result filename does not include the method name). For OWQ they run
+the calibration pass and the evaluation back-to-back.
+
+```bash
+# BERT-Base GLUE: cola mnli mrpc qnli rte stsb  (default bits "8 4")
+bash scripts/run_baselines_bert.sh
+
+# LLaMA-2-7B zero-shot: boolq piqa hellaswag winog arc-e arc-c obqa
+bash scripts/run_baselines_llama.sh
+```
+
+Both accept overridable env vars (defaults in brackets): `PYTHON[python]`,
+`GPU[0]`, `TILE[128]`, `BITS[8 4]`, `OUTDIR[./eval_output]`, `CALIB_RATIO[0.1]`,
+`OUTLIER_PER_TILE[1.0]`, `BATCH[16]`, `METHODS[LLM_int8 OWQ]`, `TASKS[...]`
+(plus `MODEL[meta-llama/Llama-2-7b-hf]` for LLaMA). Examples:
+
+```bash
+BITS="8 6 4" GPU=1 bash scripts/run_baselines_bert.sh          # all bit-widths
+TASKS="mrpc rte" METHODS="OWQ" bash scripts/run_baselines_bert.sh   # subset
+TASKS="obqa piqa" METHODS="LLM_int8" bash scripts/run_baselines_llama.sh
+```
+
+`OUTLIER_PER_TILE` is the shared per-tile FP32 budget for both baselines (and
+matches DPSQ's `target_outlier_per_tile`), so all three methods are compared at
+the same high-precision budget. Each baseline's result JSON also records
+`hp_fraction` (average fraction of PSUM columns kept in FP32).
+
+The commands each runner issues are documented individually in the per-method
+sections below.
+
 ## Common options
 
 All methods now accept `--bits {8,6,4}`. The default is `--bits 8`, which preserves the previous INT8 setting. For method B/C, use the same `--bits` value for both calibration and evaluation because calibrated step scales are bitwidth-dependent.
@@ -55,6 +90,23 @@ python -m applications.BERT_Base.eval_BERT_ADEF_DPSQ --method_file ./methods/met
 python -m applications.BERT_Base.eval_BERT_ADEF_DPSQ --method_file ./methods/methods.py --method_name DPSQ --model_name_or_path textattack/bert-base-uncased-MRPC --dataset_name mrpc --tile_size 128
 ```
 
+### LLM_int8 (PSUM-level, dynamic, approach A)
+No threshold and no calibration. `--llm_int8_outlier_per_tile` sets the average number of FP32 columns per PSUM tile (default 1.0, matching DPSQ's `target_outlier_per_tile`); internally it keeps the top-r columns by magnitude with `r = round(outlier_per_tile · ⌈K/tile_k⌉)`. The result JSON reports `hp_fraction` (average fraction of PSUM columns kept in FP32).
+```bash
+python -m applications.BERT_Base.eval_BERT_ADEF_DPSQ --method_file ./methods/methods.py --method_name LLM_int8 --model_name_or_path textattack/bert-base-uncased-MRPC --dataset_name mrpc --tile_size 128 --bits 8 --llm_int8_outlier_per_tile 1.0
+```
+
+### OWQ (PSUM-level, calibration-based, approach A)
+OWQ is a two-stage flow like method B/C. First calibrate the weak columns on a subset of the training set (`--calib_ratio 0.1` by default); `--owq_outlier_per_tile` sets the average number of FP32 weak columns per PSUM tile (default 1.0, same budget notion as LLM_int8/DPSQ). Use the **same `--bits`** for calibration and evaluation.
+```bash
+# calib (selects weak columns, saves a .pt, then exits)
+python -m applications.BERT_Base.eval_BERT_ADEF_DPSQ --method_file ./methods/methods.py --method_name OWQ --model_name_or_path textattack/bert-base-uncased-MRPC --dataset_name mrpc --tile_size 128 --bits 8 --calibrate_owq --calib_ratio 0.1 --owq_outlier_per_tile 1.0 --owq_calib_path ./eval_output/owq_mrpc_bits8.pt
+```
+```bash
+# eval (reuses the calibrated weak columns; reports hp_fraction)
+python -m applications.BERT_Base.eval_BERT_ADEF_DPSQ --method_file ./methods/methods.py --method_name OWQ --model_name_or_path textattack/bert-base-uncased-MRPC --dataset_name mrpc --tile_size 128 --bits 8 --owq_calib_path ./eval_output/owq_mrpc_bits8.pt
+```
+
 ## LLaMA2-7B
 
 ### method A
@@ -91,6 +143,21 @@ python -m applications.LLAMA_2_7B.eval_LLAMA_ADEF_DPSQ --method_file ./methods/m
 ### DPSQ (method G in our paper)
 ```bash
 python -m applications.LLAMA_2_7B.eval_LLAMA_ADEF_DPSQ --method_file ./methods/methods.py --method_name DPSQ --model_name_or_path meta-llama/Llama-2-7b-hf --dataset_name obqa --tile_size 128 --alpha 9.9
+```
+
+### LLM_int8 (PSUM-level, dynamic, approach A)
+```bash
+python -m applications.LLAMA_2_7B.eval_LLAMA_ADEF_DPSQ --method_file ./methods/methods.py --method_name LLM_int8 --model_name_or_path meta-llama/Llama-2-7b-hf --dataset_name obqa --tile_size 128 --bits 8 --llm_int8_outlier_per_tile 1.0
+```
+
+### OWQ (PSUM-level, calibration-based, approach A)
+```bash
+# calib
+python -m applications.LLAMA_2_7B.eval_LLAMA_ADEF_DPSQ --method_file ./methods/methods.py --method_name OWQ --model_name_or_path meta-llama/Llama-2-7b-hf --dataset_name obqa --tile_size 128 --bits 8 --calibrate_owq --calib_ratio 0.1 --owq_outlier_per_tile 1.0 --owq_calib_path ./eval_output/owq_obqa_bits8.pt
+```
+```bash
+# eval
+python -m applications.LLAMA_2_7B.eval_LLAMA_ADEF_DPSQ --method_file ./methods/methods.py --method_name OWQ --model_name_or_path meta-llama/Llama-2-7b-hf --dataset_name obqa --tile_size 128 --bits 8 --owq_calib_path ./eval_output/owq_obqa_bits8.pt
 ```
 
 ## SegFormer-B0

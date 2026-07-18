@@ -10,9 +10,15 @@ from applications.custom_quant import (
     load_method_from_file,
     CustomLinear,
     DPSQAlphaStats,
+    HPFractionStats,
+    attach_owq_calib_stats,
+    attach_owq_weak_columns,
+    collect_owq_weak_columns,
     load_alpha_calibration,
+    load_owq_calibration,
     parse_alpha_candidates,
     save_alpha_calibration,
+    save_owq_calibration,
     select_alpha_row,
     update_custom_method_kwargs,
     write_alpha_calibration_csv,
@@ -36,7 +42,17 @@ def main():
     parser.add_argument("--alpha_csv_path", type=str, default=None)
     parser.add_argument("--alpha_save_path", type=str, default=None)
     parser.add_argument("--calib_ratio", type=float, default=0.1)
-    
+
+    # PSUM-level mixed-precision outlier baselines (approach A)
+    parser.add_argument("--llm_int8_outlier_per_tile", type=float, default=1.0,
+                        help="LLM_int8: avg FP32 columns per PSUM tile (top-r by magnitude, no calib)")
+    parser.add_argument("--owq_outlier_per_tile", type=float, default=1.0,
+                        help="OWQ: avg FP32 weak columns per PSUM tile (top-r by calibrated sensitivity)")
+    parser.add_argument("--calibrate_owq", action="store_true",
+                        help="OWQ: run the calibration pass to select weak columns and exit")
+    parser.add_argument("--owq_calib_path", type=str, default=None,
+                        help="OWQ: path of the calibrated weak-column file (.pt) to save/load")
+
     parser.add_argument("--output_dir", type=str, default="./eval_output")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--max_length", type=int, default=512)
@@ -56,10 +72,19 @@ def main():
     if args.alpha_path is not None and not args.calibrate_alpha:
         alpha_scale, _ = load_alpha_calibration(args.alpha_path, bits=args.bits)
 
+    # Extra kwargs for the PSUM-level mixed-precision baselines (approach A).
+    # LLM_int8 is dynamic (threshold + hp_stats at construction). OWQ is
+    # calibration-based, so its per-layer stats/masks are attached later.
+    hp_stats = None
+    extra_kwargs = {}
+    if args.method_name == "LLM_int8":
+        hp_stats = HPFractionStats()
+        extra_kwargs = {"llm_int8_outlier_per_tile": args.llm_int8_outlier_per_tile, "hp_stats": hp_stats}
+
     model = replace_bert_mlp_layer(
-        model=model, method_func=selected_method, 
+        model=model, method_func=selected_method,
         tile_m=args.tile_size, tile_n=args.tile_size, tile_k=args.tile_size,
-        alpha_scale=alpha_scale, bits=args.bits
+        alpha_scale=alpha_scale, bits=args.bits, **extra_kwargs
     )
     model = inject_mask_wrapper(model, CustomLinear)
     model.eval()
@@ -137,6 +162,61 @@ def main():
         print(f"[*] Wrote alpha calibration CSV: {csv_path}")
         return
 
+    default_owq_path = os.path.join(
+        args.output_dir, f"owq_weak_cols_{args.dataset_name}_bits{args.bits}.pt"
+    )
+
+    if args.calibrate_owq:
+        if args.method_name != "OWQ":
+            raise ValueError("--calibrate_owq is only supported for method_name OWQ")
+
+        train_dataset = encoded_dataset["train"]
+        calib_size = max(1, int(len(train_dataset) * args.calib_ratio))
+        calib_size = min(calib_size, len(train_dataset))
+        calib_dataset = train_dataset.shuffle(seed=args.seed).select(range(calib_size))
+
+        training_args = TrainingArguments(
+            output_dir=os.path.join(args.output_dir, "tmp_owq_calib"),
+            do_train=False, do_eval=False,
+            per_device_eval_batch_size=args.batch_size, report_to="none", seed=args.seed,
+        )
+        trainer = Trainer(
+            model=model, args=training_args, eval_dataset=calib_dataset,
+            processing_class=tokenizer, data_collator=data_collator,
+        )
+
+        stats = attach_owq_calib_stats(model, CustomLinear)
+        _ = trainer.predict(calib_dataset)
+        masks = collect_owq_weak_columns(stats, args.owq_outlier_per_tile, args.tile_size)
+
+        save_path = args.owq_calib_path or default_owq_path
+        save_owq_calibration(save_path, {
+            "model_name_or_path": args.model_name_or_path,
+            "dataset_name": args.dataset_name,
+            "method_name": args.method_name,
+            "tile_size": args.tile_size,
+            "bits": args.bits,
+            "calib_ratio": args.calib_ratio,
+            "owq_outlier_per_tile": args.owq_outlier_per_tile,
+            "masks": masks,
+        })
+        n_layers = len(masks)
+        total_hp = sum(int(m.sum()) for m in masks.values())
+        total_cols = sum(int(m.numel()) for m in masks.values())
+        frac = (total_hp / total_cols) if total_cols else 0.0
+        print(f"\n[*] OWQ calibration done over {calib_size} samples, {n_layers} layers")
+        print(f"[*] weak-column fraction={frac:.6f}; saved {save_path}")
+        return
+
+    if args.method_name == "OWQ":
+        calib_path = args.owq_calib_path or default_owq_path
+        owq_obj = load_owq_calibration(calib_path, bits=args.bits)
+        hp_stats = HPFractionStats()
+        missing = attach_owq_weak_columns(model, CustomLinear, owq_obj["masks"], hp_stats=hp_stats)
+        if missing:
+            print(f"[!] Warning: {len(missing)} OWQ layers had no calibrated mask: {missing[:3]} ...")
+        print(f"[*] Loaded OWQ weak columns from {calib_path}")
+
     trainer = Trainer(
         model=model,
         args=TrainingArguments(output_dir=args.output_dir, do_eval=True, per_device_eval_batch_size=args.batch_size, report_to="none"),
@@ -151,6 +231,10 @@ def main():
 
     eval_result["bits"] = args.bits
     eval_result["alpha_scale"] = alpha_scale
+    if hp_stats is not None:
+        hp_summary = hp_stats.summary()
+        eval_result["hp_fraction"] = hp_summary["hp_fraction"]
+        print(f"  > high-precision (FP32) channel fraction: {hp_summary['hp_fraction']:.6f}")
     os.makedirs(args.output_dir, exist_ok=True)
     out_file = os.path.join(args.output_dir, f"eval_results_{args.dataset_name}_bits{args.bits}.json")
     with open(out_file, "w") as f: json.dump(eval_result, f, indent=4)

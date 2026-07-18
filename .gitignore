@@ -44,6 +44,8 @@ logs
 scripts/run_methodB_experiments.sh
 scripts/run_methodG_experiments.sh
 scripts/select_global_alpha.py
+scripts/run_baselines_bert.sh
+scripts/run_baselines_llama.sh
 
 # =========================
 

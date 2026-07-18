@@ -78,6 +78,134 @@ class DPSQAlphaStats:
         }
 
 
+class HPFractionStats:
+    """Accumulates the fraction of reduction channels kept in high precision (FP32).
+
+    Used by the LLM.int8()/OWQ baselines (approach A) to report the high-precision
+    overhead: how many activation channels bypass PSUM quantization on average.
+    """
+
+    def __init__(self):
+        self.total_hp_channels = 0.0
+        self.total_channels = 0.0
+        self.num_calls = 0
+
+    def update(self, hp_channels, total_channels):
+        if torch.is_tensor(hp_channels):
+            hp_channels = hp_channels.detach().cpu().item()
+        if torch.is_tensor(total_channels):
+            total_channels = total_channels.detach().cpu().item()
+
+        self.total_hp_channels += float(hp_channels)
+        self.total_channels += float(total_channels)
+        self.num_calls += 1
+
+    def summary(self):
+        if self.total_channels == 0:
+            hp_fraction = 0.0
+        else:
+            hp_fraction = self.total_hp_channels / self.total_channels
+        return {
+            "hp_channels": self.total_hp_channels,
+            "total_channels": self.total_channels,
+            "hp_fraction": hp_fraction,
+            "num_calls": self.num_calls,
+        }
+
+
+class OWQColumnStats:
+    """Per-layer accumulator of PSUM-column quantization sensitivity for OWQ.
+
+    Used during calibration: each forward adds the per-output-column squared PSUM
+    quantization error. After the calibration pass, the columns with the highest
+    mean sensitivity are selected as the FP32-preserved weak columns.
+    """
+
+    def __init__(self):
+        self.sensitivity_sum = None   # [K] on cpu
+        self.count = 0.0
+
+    def update(self, col_sensitivity, count):
+        cs = col_sensitivity.detach().to(torch.float32).cpu()
+        if self.sensitivity_sum is None:
+            self.sensitivity_sum = cs.clone()
+        else:
+            self.sensitivity_sum += cs
+        if torch.is_tensor(count):
+            count = count.detach().cpu().item()
+        self.count += float(count)
+
+    def mean_sensitivity(self) -> torch.Tensor:
+        if self.sensitivity_sum is None:
+            raise ValueError("OWQ calibration statistics are empty.")
+        denom = self.count if self.count > 0 else 1.0
+        return self.sensitivity_sum / denom
+
+    def select_weak_columns(self, outlier_per_tile: float, tile_k: int) -> torch.Tensor:
+        """Pick the top-r sensitive columns, with r sized by a per-tile budget.
+
+        r = round(outlier_per_tile * ceil(K / tile_k)), matching the per-tile
+        outlier budget used by DPSQ and LLM_int8.
+        """
+        s = self.mean_sensitivity()
+        K = s.numel()
+        num_k = (K + tile_k - 1) // tile_k
+        r = max(0, min(K, int(round(float(outlier_per_tile) * num_k))))
+        mask = torch.zeros(K, dtype=torch.bool)
+        if r > 0:
+            idx = torch.topk(s, r).indices
+            mask[idx] = True
+        return mask
+
+
+def attach_owq_calib_stats(model: nn.Module, custom_layer_class) -> Dict[str, "OWQColumnStats"]:
+    """Give every OWQ layer its own OWQColumnStats and return {layer_name: stats}."""
+    stats = {}
+    for name, module in model.named_modules():
+        if isinstance(module, custom_layer_class) and hasattr(module, "method_kwargs"):
+            s = OWQColumnStats()
+            module.method_kwargs["owq_stats"] = s
+            stats[name] = s
+    return stats
+
+
+def collect_owq_weak_columns(stats: Dict[str, "OWQColumnStats"], outlier_per_tile: float,
+                             tile_k: int) -> Dict[str, torch.Tensor]:
+    return {name: s.select_weak_columns(outlier_per_tile, tile_k) for name, s in stats.items()}
+
+
+def attach_owq_weak_columns(model: nn.Module, custom_layer_class, masks: Dict[str, torch.Tensor],
+                            hp_stats=None):
+    """Attach the calibrated weak-column mask (and optional hp_stats) to each OWQ layer.
+
+    Returns the list of layer names that had no mask in `masks` (should be empty).
+    """
+    missing = []
+    for name, module in model.named_modules():
+        if isinstance(module, custom_layer_class) and hasattr(module, "method_kwargs"):
+            if name in masks:
+                module.method_kwargs["owq_weak_col_mask"] = masks[name]
+                if hp_stats is not None:
+                    module.method_kwargs["hp_stats"] = hp_stats
+            else:
+                missing.append(name)
+    return missing
+
+
+def save_owq_calibration(save_path: str, result: dict):
+    os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+    torch.save(result, save_path)
+
+
+def load_owq_calibration(owq_calib_path: str, bits: Optional[int] = None) -> dict:
+    obj = torch.load(owq_calib_path, map_location="cpu")
+    if bits is not None and obj.get("bits") is not None and int(obj["bits"]) != int(bits):
+        raise ValueError(
+            f"OWQ calibration was built with bits={obj['bits']}, but current bits={bits}"
+        )
+    return obj
+
+
 def update_custom_method_kwargs(model: nn.Module, custom_layer_class, **kwargs):
     if not isinstance(custom_layer_class, tuple):
         custom_layer_class = (custom_layer_class,)
